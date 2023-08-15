@@ -5,29 +5,82 @@ namespace App\Controller;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\Routing\Annotation\Route;
-
+use Symfony\Component\Cache\Adapter\FilesystemAdapter;
+use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
 
 class CountryRoutingController extends AbstractController
 {
+    private $cache;
+
+    public function __construct()
+    {
+        $this->cache = new FilesystemAdapter();
+    }
 
     #[Route('/routing/{origin}/{destination}', name: 'rebuild_routes')]
-    public function index(string $origin, string $destination): JsonResponse {
+    public function index(string $origin, string $destination): JsonResponse
+    {
         $graph = $this->getGraph();
+        if (!$graph->countryExists($origin)) {
+            throw new BadRequestHttpException($origin . ' does not exist.');
+        }
+        if (!$graph->countryExists($destination)) {
+            throw new BadRequestHttpException($destination . ' does not exist.');
+        }
+
+        $route = $this->findRoute($origin, $destination);
+        if ($route === null) {
+            throw new BadRequestHttpException('No land route between ' . $origin . ' and ' . $destination);
+        }
 
         $response = [
-            'route' => $graph->findRoutes($origin, $destination)
+            'route' => $route
         ];
-
         return $this->json($response);
     }
 
-    public function getGraph() {
-        $this->cache;
-        $root = $this->getParameter('kernel.project_dir');
-        $file = $root . '/countries.json';
-        $countryData = json_decode(file_get_contents($file));
-        $graph = new CountryGraph($countryData);
+    // In our case we don't need to cache the graph data, as it only takes a few milliseconds. The caching here is done
+    // to demonstrate a case where building this data actually was too expensive to do on each request
+    public function getGraph()
+    {
+        $graphItem = $this->cache->getItem('countryGraph');
+        if (!$graphItem->isHit()) {
+            $root = $this->getParameter('kernel.project_dir');
+            $file = $root . '/countries.json';
+            $countryData = json_decode(file_get_contents($file));
+            $graph = new CountryGraph($countryData);
+            $graphItem->set($graph);
+            $this->cache->save($graphItem);
+        } else {
+            $graph = $graphItem->get();
+        }
         return $graph;
+    }
+
+    // Similarly to the above, calculating a route takes a few tens of milliseconds, but for demonstration purposes lets
+    // also cache these results. Another improvement here is be to also store the reverse path since they are symmetrical
+    public function findRoute(string $origin, string $destination)
+    {
+        $cacheKey = $origin . $destination;
+        $routeItem = $this->cache->getItem($cacheKey);
+        if (!$routeItem->isHit()) {
+            $route = $this->getGraph()->findRoute($origin, $destination);
+            $routeItem->set($route);
+            $this->cache->save($routeItem);
+
+            // Also store the reverse path
+            $reversePathKey = $destination . $origin;
+            $routeItem = $this->cache->getItem($reversePathKey);
+            if ($route === null) {
+                $routeItem->set($route);
+            } else {
+                $routeItem->set(array_reverse($route));
+            }
+            $this->cache->save($routeItem);
+        } else {
+            $route = $routeItem->get();
+        }
+        return $route;
     }
 }
 
@@ -37,71 +90,37 @@ class CountryGraph
 
     public function __construct($countryData)
     {
-        $graphData = $this->remapCountries($countryData);
-        $this->graph = $this->calculateBorderingCountriesDistance($graphData);
-    }
-
-    private function remapCountries($countries) {
-        $remapped = array();
-
-        foreach($countries as $country) {
-            $remapped[$country->cca3] = [
-                'cca3' => $country->cca3,
-                'borders' => $country->borders,
-                'latlng' => $country->latlng
-            ];
+        $this->graph = [];
+        foreach ($countryData as $country) {
+            $this->graph[$country->cca3] = $country->borders;
         }
-
-        return $remapped;
     }
 
-    private function calculateBorderingCountriesDistance($countries) {
-        $mapping = [];
-        foreach($countries as $cca3 => $country) {
-            $borders = array();
-            foreach($country['borders'] as $bordering_country_code) {
-                $bordering_country = $countries[$bordering_country_code];
-                $distance = calculateHaversineDistance($country['latlng'], $bordering_country['latlng']);
-                $borders[$bordering_country_code] = $distance;
-            }
-            $mapping[$cca3] = array(
-                'borders' => $borders,
-                'latlng' => $country['latlng']
-            );
-        }
-        return $mapping;
-    }
-
-    public function findRoutes($startCountry, $endCountry)
+    public function findRoute($startCountry, $endCountry)
     {
-        $openSet = new \SplPriorityQueue(); // Priority queue for nodes to be evaluated
-        $openSet->insert([$startCountry], 0); // Start node
+        $priorityQueue = new \SplPriorityQueue();
+        $priorityQueue->insert([$startCountry], 0);
 
-        while (!$openSet->isEmpty()) {
-            // Get the path with the lowest f score from the open set
-            $path = $openSet->extract();
+        $visited = [];
+
+        while (!$priorityQueue->isEmpty()) {
+            $path = $priorityQueue->extract();
             $currentCountry = end($path);
 
-            // Check if we've reached the destination
             if ($currentCountry === $endCountry) {
                 return $path;
             }
 
-            // Explore neighbors
-            if (isset($this->graph[$currentCountry]['borders'])) {
-                foreach ($this->graph[$currentCountry]['borders'] as $neighbor => $distance) {
-                    if (!in_array($neighbor, $path)) {
-                        // Calculate g score (distance) and heuristic h score (heuristic estimate to goal)
-                        $gScore = $distance + $this->calculatePathDistance($path);
-                        $hScore = $this->calculateHeuristicDistance($neighbor, $endCountry);
+            if (isset($visited[$currentCountry])) {
+                continue;
+            }
 
-                        // Calculate f score (total cost)
-                        $fScore = $gScore + $hScore;
+            $visited[$currentCountry] = true;
 
-                        // Add path to neighbor to open set with its f score
-                        $newPath = array_merge($path, [$neighbor]);
-                        $openSet->insert($newPath, -$fScore); // Negative f score for priority
-                    }
+            foreach ($this->graph[$currentCountry] as $neighbor) {
+                if (!isset($visited[$neighbor])) {
+                    $newPath = array_merge($path, [$neighbor]);
+                    $priorityQueue->insert($newPath, -count($newPath));
                 }
             }
         }
@@ -109,48 +128,8 @@ class CountryGraph
         return null; // No route found
     }
 
-    // Calculate the total distance of a path
-    private function calculatePathDistance(array $path)
+    public function countryExists(string $country)
     {
-        // Calculate the sum of distances along the path
-        $totalDistance = 0;
-        for ($i = 1; $i < count($path); $i++) {
-            $totalDistance += $this->graph[$path[$i - 1]]['borders'][$path[$i]];
-        }
-        return $totalDistance;
+        return array_key_exists($country, $this->graph);
     }
-
-    // Calculate a heuristic estimate of the distance to the goal
-    private function calculateHeuristicDistance($currentCountry, $goalCountry)
-    {
-        // You can use various heuristics here, such as straight-line distance, etc.
-        return calculateHaversineDistance($this->graph[$currentCountry]['latlng'], $this->graph[$goalCountry]['latlng']);
-    }
-}
-
-
-function calculateHaversineDistance($latlong_1, $latlong_2) {
-    // Convert degrees to radians
-    $lat1Rad = deg2rad($latlong_1[0]);
-    $lon1Rad = deg2rad($latlong_1[1]);
-    $lat2Rad = deg2rad($latlong_2[0]);
-    $lon2Rad = deg2rad($latlong_1[1]);
-
-    // Earth's radius in kilometers
-    $earthRadius = 6371.0;
-
-    // Haversine formula
-    $deltaLat = $lat2Rad - $lat1Rad;
-    $deltaLon = $lon2Rad - $lon1Rad;
-
-    $a = sin($deltaLat / 2) * sin($deltaLat / 2) +
-         cos($lat1Rad) * cos($lat2Rad) *
-         sin($deltaLon / 2) * sin($deltaLon / 2);
-
-    $c = 2 * atan2(sqrt($a), sqrt(1 - $a));
-
-    // Calculate the distance
-    $distance = $earthRadius * $c;
-
-    return $distance;
 }
