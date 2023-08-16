@@ -6,7 +6,6 @@ use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\Routing\Annotation\Route;
 use Symfony\Component\Cache\Adapter\FilesystemAdapter;
-use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
 
 class CountryRoutingController extends AbstractController
 {
@@ -17,7 +16,7 @@ class CountryRoutingController extends AbstractController
         $this->cache = new FilesystemAdapter();
     }
 
-    #[Route('/routing/{origin}/{destination}', name: 'rebuild_routes')]
+    #[Route('/routing/{origin}/{destination}', name: 'routing')]
     public function index(string $origin, string $destination): JsonResponse
     {
         $graph = $this->getGraph();
