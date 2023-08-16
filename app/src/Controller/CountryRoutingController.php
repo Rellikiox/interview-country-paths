@@ -22,15 +22,18 @@ class CountryRoutingController extends AbstractController
     {
         $graph = $this->getGraph();
         if (!$graph->countryExists($origin)) {
-            throw new BadRequestHttpException($origin . ' does not exist.');
+            return $this->json(['message' => $origin . ' does not exist.'], 400);
         }
         if (!$graph->countryExists($destination)) {
-            throw new BadRequestHttpException($destination . ' does not exist.');
+            return $this->json(['message' => $destination . ' does not exist.'], 400);
+        }
+        if ($origin === $destination) {
+            return $this->json(['message' => 'Countries must be different.'], 400);
         }
 
         $route = $this->findRoute($origin, $destination);
         if ($route === null) {
-            throw new BadRequestHttpException('No land route between ' . $origin . ' and ' . $destination);
+            return $this->json(['message' => 'No land route between ' . $origin . ' and ' . $destination], 400);
         }
 
         $response = [
@@ -41,7 +44,7 @@ class CountryRoutingController extends AbstractController
 
     // In our case we don't need to cache the graph data, as it only takes a few milliseconds. The caching here is done
     // to demonstrate a case where building this data actually was too expensive to do on each request
-    public function getGraph()
+    public function getGraph(): CountryGraph
     {
         $graphItem = $this->cache->getItem('countryGraph');
         if (!$graphItem->isHit()) {
@@ -59,7 +62,7 @@ class CountryRoutingController extends AbstractController
 
     // Similarly to the above, calculating a route takes a few tens of milliseconds, but for demonstration purposes lets
     // also cache these results. Another improvement here is be to also store the reverse path since they are symmetrical
-    public function findRoute(string $origin, string $destination)
+    public function findRoute(string $origin, string $destination): ?array
     {
         $cacheKey = $origin . $destination;
         $routeItem = $this->cache->getItem($cacheKey);
@@ -88,7 +91,7 @@ class CountryGraph
 {
     private $graph;
 
-    public function __construct($countryData)
+    public function __construct(array $countryData)
     {
         $this->graph = [];
         foreach ($countryData as $country) {
@@ -96,7 +99,7 @@ class CountryGraph
         }
     }
 
-    public function findRoute($startCountry, $endCountry)
+    public function findRoute(string $startCountry, string $endCountry): ?array
     {
         $priorityQueue = new \SplPriorityQueue();
         $priorityQueue->insert([$startCountry], 0);
@@ -128,7 +131,7 @@ class CountryGraph
         return null; // No route found
     }
 
-    public function countryExists(string $country)
+    public function countryExists(string $country): bool
     {
         return array_key_exists($country, $this->graph);
     }
