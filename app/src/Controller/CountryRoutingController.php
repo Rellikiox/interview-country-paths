@@ -98,6 +98,7 @@ class CountryGraph
         }
     }
 
+    // Perform Dijkstra's algorithm to find the shortest path between the two countries
     public function findRoute(string $startCountry, string $endCountry): ?array
     {
         $priorityQueue = new \SplPriorityQueue();

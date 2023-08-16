@@ -63,8 +63,10 @@ class CountryRoutingControllerTest extends ApiTestCase
     public function testReverseRoutesAreEqual(): void
     {
         $response_one = static::createClient()->request('GET', '/routing/ESP/CHN');
-        $response_two = static::createClient()->request('GET', '/routing/ESP/CHN');
+        $response_two = static::createClient()->request('GET', '/routing/CHN/ESP');
 
-        $this->assertEquals(json_decode($response_one->getContent())->route, array_reverse(json_decode($response_two->getContent())->route, true));
+        $path_one = json_decode($response_one->getContent())->route;
+        $path_two = json_decode($response_two->getContent())->route;
+        $this->assertEquals($path_one, array_reverse($path_two));
     }
 }
